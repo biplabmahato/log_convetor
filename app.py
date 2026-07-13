@@ -1,9 +1,19 @@
+import streamlit as st
 import json
-import os
 import csv
-from tkinter import Tk
-from tkinter.filedialog import askopenfilename
+import os
+import pandas as pd
+from io import StringIO
 
+st.set_page_config(
+    page_title="Cloud Log Normalizer",
+    page_icon="☁️",
+    layout="wide"
+)
+
+# ------------------------------
+# Log Parsers
+# ------------------------------
 
 def parse_aws_log(log):
     return {
@@ -11,9 +21,21 @@ def parse_aws_log(log):
         "cloud_provider": "AWS",
         "service": log.get("eventSource"),
         "action": log.get("eventName"),
-        "user": log.get("userIdentity", {}).get("userName") if isinstance(log.get("userIdentity"), dict) else log.get("userIdentity"),
-        "resource": log.get("requestParameters", {}).get("bucketName") if isinstance(log.get("requestParameters"), dict) else log.get("resource"),
-        "status": log.get("responseElements", {}).get("x-amz-request-id", "SUCCESS") if isinstance(log.get("responseElements"), dict) else log.get("status", "SUCCESS")
+        "user": (
+            log.get("userIdentity", {}).get("userName")
+            if isinstance(log.get("userIdentity"), dict)
+            else log.get("userIdentity")
+        ),
+        "resource": (
+            log.get("requestParameters", {}).get("bucketName")
+            if isinstance(log.get("requestParameters"), dict)
+            else log.get("resource")
+        ),
+        "status": (
+            log.get("responseElements", {}).get("x-amz-request-id", "SUCCESS")
+            if isinstance(log.get("responseElements"), dict)
+            else log.get("status", "SUCCESS")
+        ),
     }
 
 
@@ -21,11 +43,31 @@ def parse_gcp_log(log):
     return {
         "timestamp": log.get("timestamp"),
         "cloud_provider": "GCP",
-        "service": log.get("resource", {}).get("type") if isinstance(log.get("resource"), dict) else log.get("resource"),
-        "action": log.get("protoPayload", {}).get("methodName") if isinstance(log.get("protoPayload"), dict) else log.get("action"),
-        "user": log.get("protoPayload", {}).get("authenticationInfo", {}).get("principalEmail") if isinstance(log.get("protoPayload"), dict) else log.get("user"),
-        "resource": log.get("resource", {}).get("labels", {}).get("project_id") if isinstance(log.get("resource"), dict) else log.get("resource"),
-        "status": log.get("severity", "INFO")
+        "service": (
+            log.get("resource", {}).get("type")
+            if isinstance(log.get("resource"), dict)
+            else log.get("resource")
+        ),
+        "action": (
+            log.get("protoPayload", {}).get("methodName")
+            if isinstance(log.get("protoPayload"), dict)
+            else log.get("action")
+        ),
+        "user": (
+            log.get("protoPayload", {})
+            .get("authenticationInfo", {})
+            .get("principalEmail")
+            if isinstance(log.get("protoPayload"), dict)
+            else log.get("user")
+        ),
+        "resource": (
+            log.get("resource", {})
+            .get("labels", {})
+            .get("project_id")
+            if isinstance(log.get("resource"), dict)
+            else log.get("resource")
+        ),
+        "status": log.get("severity", "INFO"),
     }
 
 
@@ -37,108 +79,136 @@ def parse_azure_log(log):
         "action": log.get("operationName"),
         "user": log.get("caller"),
         "resource": log.get("resourceId"),
-        "status": log.get("status", {}).get("value", "Success") if isinstance(log.get("status"), dict) else log.get("status", "Success")
+        "status": (
+            log.get("status", {}).get("value", "Success")
+            if isinstance(log.get("status"), dict)
+            else log.get("status", "Success")
+        ),
     }
 
+
+# ------------------------------
+# Normalize
+# ------------------------------
 
 def normalize_log(log):
     try:
         if "eventTime" in log and "eventSource" in log:
             return parse_aws_log(log)
+
         elif "protoPayload" in log:
             return parse_gcp_log(log)
+
         elif "resourceId" in log and "caller" in log:
             return parse_azure_log(log)
-        else:
-            return None
-    except Exception as e:
+
+        return None
+
+    except Exception:
         return None
 
 
-def load_json_logs(filepath):
-    """Load logs from JSON file"""
-    with open(filepath, 'r') as f:
-        data = json.load(f)
+# ------------------------------
+# Loaders
+# ------------------------------
 
-    # If top-level is a list, return it
+def load_json_logs(uploaded_file):
+    data = json.load(uploaded_file)
+
     if isinstance(data, list):
         return data
-    # If top-level contains a 'Records' key or similar
+
     elif isinstance(data, dict):
         for key in ["Records", "entries", "logEvents"]:
             if key in data:
                 return data[key]
-        return [data]  # maybe single log
+
+        return [data]
+
     return []
 
 
-def load_csv_logs(filepath):
-    """Load logs from CSV file and convert to list of dictionaries"""
-    logs = []
-    with open(filepath, 'r', newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            logs.append(row)
-    return logs
+def load_csv_logs(uploaded_file):
+    string_data = StringIO(uploaded_file.getvalue().decode("utf-8"))
+    reader = csv.DictReader(string_data)
+    return list(reader)
 
 
-def write_csv(logs, output_file="normalized_logs.csv"):
-    if not logs:
-        print("No valid logs to write.")
-        return
+# ------------------------------
+# UI
+# ------------------------------
 
-    keys = logs[0].keys()
-    with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(logs)
-    print(f" Logs written to {output_file}")
+st.title("☁️ Cloud Log Normalizer")
+st.write(
+    """
+Upload AWS CloudTrail, Google Cloud Logging, or Azure Activity Logs
+(JSON or CSV). The application will normalize them into a common format.
+"""
+)
 
+uploaded_file = st.file_uploader(
+    "Choose a log file",
+    type=["json", "csv"]
+)
 
-def main():
-    print("Select a log file (JSON or CSV format for AWS / GCP / Azure)...")
-    Tk().withdraw()
-    filepath = askopenfilename(filetypes=[
-        ("All supported files", "*.json;*.csv"),
-        ("JSON files", "*.json"),
-        ("CSV files", "*.csv")
-    ])
+if uploaded_file:
 
-    if not filepath:
-        print("No file selected.")
-        return
+    extension = os.path.splitext(uploaded_file.name)[1].lower()
 
-    print(f"🔍 Processing: {os.path.basename(filepath)}")
+    if extension == ".json":
+        raw_logs = load_json_logs(uploaded_file)
 
-    # Determine file type and load accordingly
-    file_extension = os.path.splitext(filepath)[1].lower()
-    
-    if file_extension == '.json':
-        raw_logs = load_json_logs(filepath)
-    elif file_extension == '.csv':
-        raw_logs = load_csv_logs(filepath)
+    elif extension == ".csv":
+        raw_logs = load_csv_logs(uploaded_file)
+
     else:
-        print("❌ Unsupported file format. Please select a JSON or CSV file.")
-        return
+        st.error("Unsupported file format.")
+        st.stop()
 
-    print(f"📊 Found {len(raw_logs)} log entries.")
+    st.success(f"Loaded {len(raw_logs)} log entries.")
 
-    normalized = []
+    normalized_logs = []
     skipped = 0
 
     for log in raw_logs:
-        norm = normalize_log(log)
-        if norm:
-            normalized.append(norm)
+        normalized = normalize_log(log)
+
+        if normalized:
+            normalized_logs.append(normalized)
         else:
             skipped += 1
 
-    print(f"✅ Normalized {len(normalized)} logs.")
-    if skipped > 0:
-        print(f"⚠️ Skipped {skipped} unrecognized entries.")
+    st.metric("Normalized Logs", len(normalized_logs))
+    st.metric("Skipped Logs", skipped)
 
-    write_csv(normalized)
+    if len(normalized_logs) > 0:
 
+        df = pd.DataFrame(normalized_logs)
 
-if __name__ == "__main__":
-    main()
+        st.subheader("Normalized Logs")
+
+        st.dataframe(df, use_container_width=True)
+
+        st.subheader("Statistics")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.write("### Cloud Provider Distribution")
+            st.bar_chart(df["cloud_provider"].value_counts())
+
+        with col2:
+            st.write("### Status Distribution")
+            st.bar_chart(df["status"].value_counts())
+
+        csv_data = df.to_csv(index=False).encode("utf-8")
+
+        st.download_button(
+            label="📥 Download Normalized CSV",
+            data=csv_data,
+            file_name="normalized_logs.csv",
+            mime="text/csv",
+        )
+
+    else:
+        st.warning("No recognizable cloud logs found.")
